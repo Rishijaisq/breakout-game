@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Breakout Game</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #1a1a2e; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; font-family: sans-serif; color: #fff; gap: 10px; }
+    h1 { font-size: 22px; font-weight: 500; letter-spacing: 2px; color: #9FE1CB; }
+    #score-row { display: flex; gap: 20px; font-size: 14px; color: #aaa; }
+    #score-row span { font-weight: 600; color: #fff; }
+    canvas { border-radius: 10px; display: block; border: 1px solid #333; cursor: none; }
+    #msg { font-size: 16px; font-weight: 500; color: #EF9F27; min-height: 24px; }
+    #pwinfo { font-size: 12px; color: #888; }
+    #start-btn { padding: 8px 32px; border-radius: 8px; border: 1px solid #9FE1CB; background: transparent; font-size: 14px; cursor: pointer; color: #9FE1CB; transition: background 0.2s; }
+    #start-btn:hover { background: rgba(159,225,203,0.15); }
+  </style>
+</head>
+<body>
+  <h1>BREAKOUT</h1>
+  <div id="score-row">Level: <span id="lvl">1</span> &nbsp; Score: <span id="sc">0</span> &nbsp; Lives: <span id="lv">3</span> &nbsp; Power-up: <span id="pwup">none</span></div>
+  <canvas id="c" width="480" height="340"></canvas>
+  <div id="msg">Press Start to play!</div>
+  <div id="pwinfo">Power-ups: W = Wide Paddle &nbsp;|&nbsp; S = Slow Ball &nbsp;|&nbsp; M = Multi-ball</div>
+  <button id="start-btn" onclick="startGame()">Start</button>
+
+  <script>
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+
+    const BRICK_ROWS=5, BRICK_COLS=10, BRICK_W=42, BRICK_H=16, BRICK_PAD=4, BRICK_TOP=40;
+    const COLORS=['#E24B4A','#EF9F27','#1D9E75','#378ADD','#D4537E','#7F77DD'];
+    const PW_COLORS={wide:'#EF9F27',slow:'#1D9E75',multi:'#D4537E'};
+
+    let balls, paddle, bricks, score, lives, level, running, animId, powerups, pwTimer, pwActive;
+    const audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+
+    function beep(freq, dur, type='square', vol=0.15) {
+      try {
+        const o = audioCtx.createOscillator();
+        const g = audioCtx.createGain();
+        o.connect(g); g.connect(audioCtx.destination);
+        o.type = type; o.frequency.value = freq;
+        g.gain.setValueAtTime(vol, audioCtx.currentTime);
+        g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+        o.start(); o.stop(audioCtx.currentTime + dur);
+      } catch(e) {}
+    }
+
+    function sndBrick()  { beep(440, 0.08, 'square'); }
+    function sndPaddle() { beep(220, 0.07, 'sine'); }
+    function sndWall()   { beep(180, 0.05, 'sine'); }
+    function sndPowerup(){ beep(600,0.15,'sine',0.2); setTimeout(()=>beep(800,0.15,'sine',0.2),100); }
+    function sndLose()   { beep(150, 0.3, 'sawtooth', 0.2); }
+    function sndWin()    { [600,700,800].forEach((f,i)=>setTimeout(()=>beep(f,0.15,'sine',0.2),i*120)); }
+
+    function makeBricks() {
+      let b=[];
+      for(let r=0;r<BRICK_ROWS;r++)
+        for(let c=0;c<BRICK_COLS;c++)
+          b.push({x:c*(BRICK_W+BRICK_PAD)+14, y:r*(BRICK_H+BRICK_PAD)+BRICK_TOP, alive:true, color:COLORS[r%COLORS.length]});
+      return b;
+    }
+
+    function makeBall(x,y) {
+      const sp=2.8;
+      return {x:x||W/2, y:y||H-80, dx:sp*(Math.random()>0.5?1:-1), dy:-sp, r:7};
+    }
+
+    function startGame() {
+      if(animId) cancelAnimationFrame(animId);
+      score=0; lives=3; level=1;
+      bricks=makeBricks(); balls=[makeBall()];
+      paddle={x:W/2-50, y:H-24, w:100, h:12};
+      powerups=[]; pwTimer=0; pwActive=null;
+      running=true;
+      document.getElementById('msg').textContent='';
+      document.getElementById('start-btn').textContent='Restart';
+      updateUI(); loop();
+    }
+
+    function updateUI() {
+      document.getElementById('lvl').textContent=level;
+      document.getElementById('sc').textContent=score;
+      document.getElementById('lv').textContent=lives;
+      document.getElementById('pwup').textContent=pwActive?pwActive+' ('+Math.ceil(pwTimer/60)+'s)':'none';
+    }
+
+    function applyPowerup(type) {
+      pwActive=type; pwTimer=300; sndPowerup();
+      if(type==='wide') paddle.w=140;
+      if(type==='slow') balls.forEach(b=>{b.dx*=0.6; b.dy*=0.6;});
+      if(type==='multi') {
+        let nb=balls[0];
+        balls.push(makeBall(nb.x,nb.y));
+        balls.push(makeBall(nb.x,nb.y));
+      }
+      updateUI();
+    }
+
+    function clearPowerup() {
+      if(pwActive==='wide') paddle.w=100;
+      pwActive=null; updateUI();
+    }
+
+    function drawBg() {
+      ctx.fillStyle='#0f0f1a';
+      ctx.fillRect(0,0,W,H);
+    }
+
+    function drawBalls() {
+      balls.forEach(b=>{
+        ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,Math.PI*2);
+        ctx.fillStyle='#ffffff'; ctx.fill();
+      });
+    }
+
+    function drawPaddle() {
+      ctx.beginPath(); ctx.roundRect(paddle.x,paddle.y,paddle.w,paddle.h,6);
+      ctx.fillStyle=pwActive==='wide'?'#EF9F27':'#9FE1CB'; ctx.fill();
+    }
+
+    function drawBricks() {
+      bricks.forEach(b=>{
+        if(!b.alive) return;
+        ctx.beginPath(); ctx.roundRect(b.x,b.y,BRICK_W,BRICK_H,3);
+        ctx.fillStyle=b.color; ctx.fill();
+      });
+    }
+
+    function drawPowerups() {
+      powerups.forEach(p=>{
+        ctx.beginPath(); ctx.arc(p.x,p.y,9,0,Math.PI*2);
+        ctx.fillStyle=PW_COLORS[p.type]||'#fff'; ctx.fill();
+        ctx.fillStyle='#fff'; ctx.font='bold 9px sans-serif';
+        ctx.textAlign='center'; ctx.textBaseline='middle';
+        ctx.fillText(p.type==='wide'?'W':p.type==='slow'?'S':'M', p.x, p.y);
+      });
+    }
+
+    function drawPwTimer() {
+      if(!pwActive||!pwTimer) return;
+      ctx.fillStyle='rgba(255,255,255,0.15)';
+      ctx.fillRect(0,H-4,W*(pwTimer/300),4);
+    }
+
+    function update() {
+      if(pwActive){ pwTimer--; if(pwTimer<=0) clearPowerup(); }
+
+      powerups.forEach(p=>p.y+=2);
+      powerups=powerups.filter(p=>{
+        if(p.y>H) return false;
+        if(p.x>paddle.x&&p.x<paddle.x+paddle.w&&p.y+9>paddle.y&&p.y-9<paddle.y+paddle.h){
+          applyPowerup(p.type); return false;
+        }
+        return true;
+      });
+
+      balls=balls.filter(b=>{
+        b.x+=b.dx; b.y+=b.dy;
+        if(b.x-b.r<0){b.x=b.r; b.dx=Math.abs(b.dx); sndWall();}
+        if(b.x+b.r>W){b.x=W-b.r; b.dx=-Math.abs(b.dx); sndWall();}
+        if(b.y-b.r<0){b.y=b.r; b.dy=Math.abs(b.dy); sndWall();}
+
+        if(b.y+b.r>paddle.y&&b.x>paddle.x&&b.x<paddle.x+paddle.w){
+          let hit=(b.x-(paddle.x+paddle.w/2))/(paddle.w/2);
+          let sp=Math.sqrt(b.dx*b.dx+b.dy*b.dy);
+          b.dx=hit*sp*1.1; b.dy=-Math.abs(b.dy);
+          b.y=paddle.y-b.r-1; sndPaddle();
+        }
+
+        bricks.forEach(br=>{
+          if(!br.alive) return;
+          if(b.x+b.r>br.x&&b.x-b.r<br.x+BRICK_W&&b.y+b.r>br.y&&b.y-b.r<br.y+BRICK_H){
+            br.alive=false; score+=10*level; sndBrick();
+            let fromLeft=b.x-br.x, fromRight=(br.x+BRICK_W)-b.x;
+            let fromTop=b.y-br.y, fromBot=(br.y+BRICK_H)-b.y;
+            if(Math.min(fromLeft,fromRight)<Math.min(fromTop,fromBot)) b.dx*=-1; else b.dy*=-1;
+            const pw=['wide','slow','multi'];
+            if(Math.random()<0.12) powerups.push({x:br.x+BRICK_W/2, y:br.y, type:pw[Math.floor(Math.random()*3)]});
+            updateUI();
+          }
+        });
+
+        if(b.y-b.r>H) return false;
+        return true;
+      });
+
+      if(balls.length===0){
+        lives--; updateUI();
+        if(lives<=0){ running=false; sndLose(); document.getElementById('msg').textContent='Game over! Score: '+score; return; }
+        balls=[makeBall()]; clearPowerup(); sndLose();
+      }
+
+      if(bricks.every(b=>!b.alive)){
+        sndWin(); level++; bricks=makeBricks(); balls=[makeBall()];
+        clearPowerup(); powerups=[]; updateUI();
+      }
+    }
+
+    canvas.addEventListener('mousemove', e=>{
+      let rect=canvas.getBoundingClientRect();
+      paddle.x=Math.max(0,Math.min(W-paddle.w,(e.clientX-rect.left)-paddle.w/2));
+    });
+    canvas.addEventListener('touchmove', e=>{
+      e.preventDefault();
+      let rect=canvas.getBoundingClientRect();
+      paddle.x=Math.max(0,Math.min(W-paddle.w,(e.touches[0].clientX-rect.left)-paddle.w/2));
+    },{passive:false});
+
+    function loop(){
+      if(!running) return;
+      drawBg(); drawBricks(); drawPowerups(); drawPaddle(); drawBalls(); drawPwTimer(); update();
+      animId=requestAnimationFrame(loop);
+    }
+
+    drawBg();
+    ctx.fillStyle='#ffffff33'; ctx.font='16px sans-serif';
+    ctx.textAlign='center'; ctx.fillText('Press Start to play', W/2, H/2);
+  </script>
+</body>
+</html>
